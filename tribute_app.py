@@ -1,57 +1,72 @@
 #!/usr/bin/env python3
 """
 tribute_bot.py
-Single-file Flask + Discord app that:
- - Serves a tribute web page at /
- - Exposes /raw/thanks and /raw/glory plaintext endpoints
- - If DISCORD_TOKEN is provided in .env, runs a Discord bot with a /chikatto slash command
-Usage:
-  1) Create .env (example below)
-  2) pip install -r requirements.txt
+Single-file Flask + Discord tribute app.
+
+Features:
+ - Serves a gentle tribute page at "/" (uses PORT env on hosts like Render)
+ - Provides /raw/thanks and /raw/glory text endpoints
+ - Runs a Discord bot (if DISCORD_TOKEN is set) with:
+     - Slash command: /chikatto
+     - Prefix command: !chikatto
+     - Slash command: /start    (shows info + link to web page if BASE_URL set)
+ - All configuration via environment (.env) with safe defaults.
+
+Usage (local):
+  1) pip install -r requirements.txt
+  2) create a .env with DISCORD_TOKEN (and optionally set other variables)
   3) python tribute_bot.py
+
+Recommended env vars (example at bottom of this file)
 """
 
 import os
 import threading
-import html as _html
 import datetime
+import html as _html
 from dotenv import load_dotenv
 
-# web
+# --- web ---
 from flask import Flask, Response
 
-# discord
+# --- discord ---
 import discord
 from discord.ext import commands
 
 load_dotenv()
 
-# ===== ENV / CONFIG =====
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # REQUIRED for bot; if missing, bot won't start
-GUILD_ID = os.getenv("GUILD_ID")            # optional (put guild/server id for instant command sync)
+# ===== CONFIG (env or defaults) =====
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")            # REQUIRED for the bot to run
+GUILD_ID = os.getenv("GUILD_ID")                      # optional: set to your server ID for instant slash sync
+BASE_URL = os.getenv("BASE_URL", "")                  # optional: public URL of the web page (helpful in /start)
 FRIEND_NAME = os.getenv("FRIEND_NAME", "chikatto")
 YOUR_NAME = os.getenv("YOUR_NAME", "Max")
 START_YEAR = os.getenv("START_YEAR", "2023")
 END_YEAR = os.getenv("END_YEAR", "2025")
-# default to the image link you provided
-EMBED_IMAGE_URL = os.getenv("EMBED_IMAGE_URL", "https://i.postimg.cc/5y8PXNB6/9eee9a20dd4cdb333012e10346820c04.png")
+EMBED_IMAGE_URL = os.getenv(
+    "EMBED_IMAGE_URL",
+    "https://i.postimg.cc/5y8PXNB6/9eee9a20dd4cdb333012e10346820c04.png"
+)
 HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "5000"))
+PORT = int(os.getenv("PORT", os.getenv("RENDER_PORT", "5000")))  # free override for Render (RENDER_PORT sometimes set)
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
-# ===== Build two 200-word texts (guaranteed 200 words) =====
+# ===== Helper: build exact-200-word texts =====
 def _make_200_words(parts, pad_phrase):
+    """Join `parts`, append a small closing, then pad/trim to exactly 200 words."""
     base = "".join(parts).strip()
-    # small closing to help flow
     base += " I will keep you in my stories and in the quiet corners of my days."
     words = base.split()
+    # pad
     while len(words) < 200:
         words += pad_phrase.split()
+    # trim
     if len(words) > 200:
         words = words[:200]
     return " ".join(words)
 
-thanks_parts = [
+# thank-you text parts
+_thanks_parts = [
     "I want to thank you for being my friend in ways that feel too deep for simple sentences. ",
     "You arrived quietly and stayed through ordinary days and the storms, giving steadiness when I needed it most. ",
     "You listened like few ever do — patient, ready with a joke, a memory, a steady hand. ",
@@ -66,9 +81,10 @@ thanks_parts = [
     "Thank you, chikatto, for everything you gave — for being ordinary and extraordinary all at once. ",
     "I miss you deeply and I will honor you in small, steady ways. "
 ]
-THANKS_TEXT = _make_200_words(thanks_parts, "I remember you.")
+THANKS_TEXT = _make_200_words(_thanks_parts, "I remember you.")
 
-glory_parts = [
+# glorify text parts
+_glory_parts = [
     "You shone with a quiet brilliance that did not need an audience. ",
     "Your laugh was a comet that warmed the room, and your courage often hid behind gentle words. ",
     "You moved through life with a stubborn tenderness that made ordinary days feel elevated. ",
@@ -83,9 +99,9 @@ glory_parts = [
     "Your story will be told in small rituals, in the songs we pick, in the promises we keep. ",
     "Rest in the honor you earned every day just by being yourself. "
 ]
-GLORY_TEXT = _make_200_words(glory_parts, "You mattered.")
+GLORY_TEXT = _make_200_words(_glory_parts, "You mattered.")
 
-# ===== Flask web app =====
+# ===== Flask web app (simple, self-contained) =====
 web_app = Flask(__name__)
 
 HTML_TEMPLATE = """<!doctype html>
@@ -145,11 +161,10 @@ HTML_TEMPLATE = """<!doctype html>
 
 @web_app.route("/")
 def index():
-    # escape text into safe HTML with preserved line breaks
     thanks_html = _html.escape(THANKS_TEXT).replace("\n", "<br>")
     glory_html = _html.escape(GLORY_TEXT).replace("\n", "<br>")
     page = (HTML_TEMPLATE
-            .replace("%%IMAGE_URL%%", EMBED_IMAGE_URL)
+            .replace("%%IMAGE_URL%%", _html.escape(EMBED_IMAGE_URL))
             .replace("%%FRIEND_NAME%%", _html.escape(FRIEND_NAME))
             .replace("%%YOUR_NAME%%", _html.escape(YOUR_NAME))
             .replace("%%START%%", _html.escape(START_YEAR))
@@ -167,71 +182,111 @@ def raw_thanks():
 def raw_glory():
     return Response(GLORY_TEXT, mimetype="text/plain; charset=utf-8")
 
-# ===== Discord bot (slash command) =====
+# ===== Discord bot: both slash + prefix commands =====
 def start_discord_bot():
     if not DISCORD_TOKEN:
-        print("DISCORD_TOKEN not set — skipping Discord bot startup.")
+        print("DISCORD_TOKEN not found — skipping Discord bot startup.")
         return
 
     intents = discord.Intents.default()
     bot = commands.Bot(command_prefix="!", intents=intents)
 
-    # create slash command
-    @bot.tree.command(name="chikatto", description=f"Tribute to {FRIEND_NAME}")
-    async def _chikatto(interaction: discord.Interaction):
-        # build embed
+    def build_tribute_embed():
+        """Create a single embed containing both 200-word texts."""
+        title = f"🌹 Remembering {FRIEND_NAME} ({START_YEAR} – {END_YEAR})"
+        description = (
+            "**Thank you**\n\n"
+            + THANKS_TEXT
+            + "\n\n**Remembering & Glorifying**\n\n"
+            + GLORY_TEXT
+        )
         embed = discord.Embed(
-            title=f"In Loving Memory — {FRIEND_NAME}",
-            description=f"**Thank you**\n\n{THANKS_TEXT}\n\n**Remembering & Glorifying**\n\n{GLORY_TEXT}",
+            title=title,
+            description=description,
             color=0xD4AF37,
             timestamp=datetime.datetime.utcnow()
         )
-        # set main image and a small footer
         embed.set_image(url=EMBED_IMAGE_URL)
         embed.set_footer(text=f"— {YOUR_NAME} • {START_YEAR}-{END_YEAR}")
-        # send (non-ephemeral so it shows in channel)
+        return embed
+
+    # Slash command: /chikatto
+    @bot.tree.command(name="chikatto", description=f"Tribute to {FRIEND_NAME}")
+    async def _chikatto(interaction: discord.Interaction):
+        embed = build_tribute_embed()
         try:
             await interaction.response.send_message(embed=embed)
         except Exception:
             # fallback if initial response fails
-            await interaction.followup.send(embed=embed)
+            try:
+                await interaction.followup.send(embed=embed)
+            except Exception as e:
+                print("Failed to send /chikatto embed:", e)
+
+    # Prefix command: !chikatto
+    @bot.command(name="chikatto")
+    async def chikatto_prefix(ctx: commands.Context):
+        embed = build_tribute_embed()
+        try:
+            await ctx.send(embed=embed)
+        except Exception as e:
+            print("Failed to send !chikatto embed:", e)
+
+    # Slash command: /start (quick info)
+    @bot.tree.command(name="start", description="Show tribute bot info & link")
+    async def _start(interaction: discord.Interaction):
+        desc = (
+            f"Tribute bot ready. Use `/chikatto` or `!chikatto` to post the tribute for **{FRIEND_NAME}**.\n\n"
+        )
+        if BASE_URL:
+            desc += f"Open the tribute page: {BASE_URL}\n\n"
+        desc += "If you manage this bot, set environment variables (DISCORD_TOKEN, FRIEND_NAME, etc.) in your host."
+        embed = discord.Embed(title="🌟 Tribute Bot Ready", description=desc, color=0x8AB4F8, timestamp=datetime.datetime.utcnow())
+        embed.set_footer(text=f"— {YOUR_NAME}")
+        try:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception:
+            try:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            except Exception as e:
+                print("Failed to send /start reply:", e)
 
     @bot.event
     async def on_ready():
         print(f"Discord bot logged in as {bot.user} (id: {bot.user.id})")
-        # sync commands to guild if provided for instant availability, else global sync
+        # Try to sync commands. If GUILD_ID set, sync to that guild for instant availability.
         try:
             if GUILD_ID:
-                guild = discord.Object(id=int(GUILD_ID))
-                bot.tree.copy_global_to(guild=guild)
-                await bot.tree.sync(guild=guild)
-                print(f"Synced slash commands to GUILD {GUILD_ID}")
+                guild_obj = discord.Object(id=int(GUILD_ID))
+                bot.tree.copy_global_to(guild=guild_obj)
+                await bot.tree.sync(guild=guild_obj)
+                print(f"Synced slash commands to guild {GUILD_ID}")
             else:
                 await bot.tree.sync()
-                print("Synced global slash commands (can take up to 1 hour to appear).")
+                print("Synced global slash commands (may take up to 1 hour to appear globally).")
         except Exception as e:
-            print("Command sync error:", e)
+            print("Slash command sync warning:", e)
 
-    # Run the bot (blocking call)
+    # Run bot (blocking)
     bot.run(DISCORD_TOKEN)
 
-# ===== Main: run Flask in a thread and optionally run Discord bot =====
+# ===== Main: run Flask in a background thread, optionally run Discord bot =====
 def run_flask():
-    # disable reloader when running in thread
+    # When running in a thread, disable reloader to avoid double-starting
     web_app.run(host=HOST, port=PORT, debug=DEBUG, use_reloader=False)
 
 if __name__ == "__main__":
-    print("Starting tribute web server at http://%s:%s" % (HOST, PORT))
+    print(f"Starting tribute web server at http://{HOST}:{PORT}  (friend: {FRIEND_NAME})")
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # start discord bot in main thread (blocking) if token present
     if DISCORD_TOKEN:
-        print("Discord token found — starting bot. If you'd prefer only the web app, remove DISCORD_TOKEN from .env.")
+        print("Discord token present — starting the Discord bot (slash + prefix commands).")
         start_discord_bot()
     else:
-        # keep the main thread alive while Flask runs in background
+        print("No DISCORD_TOKEN found — bot disabled. Only the web page is running.")
         try:
+            # Keep running while Flask thread serves
             while True:
                 threading.Event().wait(3600)
         except KeyboardInterrupt:
