@@ -30,7 +30,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # REQUIRED for bot; if missing, bot won't start
 GUILD_ID = os.getenv("GUILD_ID")            # optional (put guild/server id for instant command sync)
 FRIEND_NAME = os.getenv("FRIEND_NAME", "chikatto")
-YOUR_NAME = os.getenv("YOUR_NAME", "Aadi")
+YOUR_NAME = os.getenv("YOUR_NAME", "Max")
 START_YEAR = os.getenv("START_YEAR", "2023")
 END_YEAR = os.getenv("END_YEAR", "2025")
 # default to the image link you provided
